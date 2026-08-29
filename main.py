@@ -17,7 +17,7 @@ import logging
 import signal
 from types import FrameType
 
-from config.settings import AppConfig, load_config
+from config.settings import Settings, load_settings
 
 logger = logging.getLogger("arbix")
 
@@ -35,7 +35,7 @@ class ArbiXApplication:
 
     def __init__(
         self,
-        settings: AppConfig,
+        settings: Settings,
     ) -> None:
         self.settings = settings
         self._shutdown_event = asyncio.Event()
@@ -83,13 +83,13 @@ class ArbiXApplication:
 
 
 def configure_logging(
-    settings: AppConfig,
+    settings: Settings,
 ) -> None:
     """Configure application logging."""
     logging.basicConfig(
         level=getattr(
             logging,
-            settings.log_level.upper(),
+            getattr(settings, "log_level", "INFO").upper(),
             logging.INFO,
         ),
         format=(
@@ -126,11 +126,6 @@ def install_signal_handlers(
                 signal.signal(signal_value, handle_signal)
             except (ValueError, OSError):
                 pass
-
-
-def load_settings() -> AppConfig:
-    """Load application configuration using config.settings."""
-    return load_config()
 
 
 async def async_main() -> None:
