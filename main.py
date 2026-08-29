@@ -17,8 +17,7 @@ import logging
 import signal
 from types import FrameType
 
-from config.settings import Settings
-
+from config.settings import AppConfig, load_config
 
 logger = logging.getLogger("arbix")
 
@@ -36,96 +35,57 @@ class ArbiXApplication:
 
     def __init__(
         self,
-        settings: Settings,
+        settings: AppConfig,
     ) -> None:
         self.settings = settings
-
         self._shutdown_event = asyncio.Event()
         self._running = False
 
     async def start(self) -> None:
-        """
-        Start the ArbiX application.
-        """
-
+        """Start the ArbiX application."""
         if self._running:
-            logger.warning(
-                "ArbiX is already running."
-            )
+            logger.warning("ArbiX is already running.")
             return
 
         self._running = True
 
-        logger.info(
-            "Starting ArbiX..."
-        )
-
-        logger.info(
-            "Trading mode: %s",
-            self.settings.trading_mode,
-        )
-
-        logger.info(
-            "ArbiX started successfully."
-        )
+        logger.info("Starting ArbiX...")
+        logger.info("Trading mode: %s", self.settings.trading_mode)
+        logger.info("ArbiX started successfully.")
 
     async def run(self) -> None:
         """
         Run the main application lifecycle.
 
-        The application remains alive until a shutdown signal is
-        received.
+        The application remains alive until a shutdown signal is received.
         """
-
         await self.start()
 
         try:
             await self._shutdown_event.wait()
-
         finally:
             await self.shutdown()
 
     async def shutdown(self) -> None:
-        """
-        Gracefully shut down the application.
-        """
-
+        """Gracefully shut down the application."""
         if not self._running:
             return
 
-        logger.info(
-            "Shutting down ArbiX..."
-        )
-
+        logger.info("Shutting down ArbiX...")
         self._running = False
-
-        logger.info(
-            "ArbiX shutdown completed."
-        )
+        logger.info("ArbiX shutdown completed.")
 
     def request_shutdown(self) -> None:
-        """
-        Request graceful application shutdown.
-        """
-
+        """Request graceful application shutdown."""
         if not self._shutdown_event.is_set():
-            logger.info(
-                "Shutdown requested."
-            )
-
+            logger.info("Shutdown requested.")
             self._shutdown_event.set()
 
 
 def configure_logging(
-    settings: Settings,
+    settings: AppConfig,
 ) -> None:
-    """
-    Configure application logging.
-
-    Logging configuration is intentionally kept simple for now.
-    A dedicated logging subsystem can be introduced later.
-    """
-
+    """Configure application logging."""
     logging.basicConfig(
         level=getattr(
             logging,
@@ -144,101 +104,56 @@ def configure_logging(
 def install_signal_handlers(
     application: ArbiXApplication,
 ) -> None:
-    """
-    Register operating-system signal handlers.
-
-    Graceful shutdown is especially important for a trading system
-    because active tasks should be stopped safely.
-    """
-
+    """Register operating-system signal handlers safely across platforms."""
     loop = asyncio.get_running_loop()
 
     def handle_signal(
         signum: int,
-        frame: FrameType | None,
+        frame: FrameType | None = None,
     ) -> None:
-        logger.info(
-            "Received shutdown signal: %s",
-            signum,
-        )
-
+        logger.info("Received shutdown signal: %s", signum)
         application.request_shutdown()
 
-    for signal_name in (
-        "SIGINT",
-        "SIGTERM",
-    ):
-        signal_value = getattr(
-            signal,
-            signal_name,
-            None,
-        )
-
+    for signal_name in ("SIGINT", "SIGTERM"):
+        signal_value = getattr(signal, signal_name, None)
         if signal_value is None:
             continue
 
         try:
-            loop.add_signal_handler(
-                signal_value,
-                handle_signal,
-                signal_value,
-                None,
-            )
-        except NotImplementedError:
-            # Windows may not support add_signal_handler
-            # for all signal types.
-            signal.signal(
-                signal_value,
-                handle_signal,
-            )
+            loop.add_signal_handler(signal_value, handle_signal, signal_value)
+        except (NotImplementedError, AttributeError):
+            try:
+                signal.signal(signal_value, handle_signal)
+            except (ValueError, OSError):
+                pass
 
 
-def load_settings() -> Settings:
-    """
-    Load application configuration.
-
-    Settings is responsible for reading and validating configuration.
-    """
-
-    return Settings()
+def load_settings() -> AppConfig:
+    """Load application configuration using config.settings."""
+    return load_config()
 
 
 async def async_main() -> None:
-    """
-    Asynchronous application entry point.
-    """
-
+    """Asynchronous application entry point."""
     settings = load_settings()
 
-    configure_logging(
-        settings
-    )
+    configure_logging(settings)
 
     application = ArbiXApplication(
         settings=settings,
     )
 
-    install_signal_handlers(
-        application
-    )
+    install_signal_handlers(application)
 
     await application.run()
 
 
 def main() -> None:
-    """
-    Synchronous application entry point.
-    """
-
+    """Synchronous application entry point."""
     try:
-        asyncio.run(
-            async_main()
-        )
-
+        asyncio.run(async_main())
     except KeyboardInterrupt:
-        logger.info(
-            "ArbiX interrupted by user."
-        )
+        logger.info("ArbiX interrupted by user.")
 
 
 if __name__ == "__main__":
