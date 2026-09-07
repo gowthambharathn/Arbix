@@ -4,7 +4,7 @@ ArbiX is an asynchronous, high-performance cryptocurrency cross-exchange arbitra
 
 The project is designed to monitor cryptocurrency prices across multiple exchanges, normalize order book data, detect profitable arbitrage opportunities, and calculate potential net profit after accounting for trading fees, slippage, and execution costs.
 
-> **Current Status:** Core domain models and the asynchronous market simulation pipeline are implemented and operational.
+> **Current Status:** Core domain models, high-precision order books, and clean asynchronous pipeline output are operational. Ready for Phase 1 live data integration.
 
 ---
 
@@ -34,347 +34,275 @@ Features include:
   * `ask_cost()`
   * `bid_value()`
   * `bid_proceeds()`
-* Tuple-based helpers for compatibility:
-
-  * `get_best_bid()`
-  * `get_best_ask()`
 
 ---
 
-## ⚡ Asynchronous Market Data Pipeline
+### Asynchronous Pipeline & Standardized Logging
 
-The application uses Python's `asyncio` framework to support a non-blocking, asynchronous execution pipeline.
+The application uses Python's `asyncio` framework for a non-blocking execution loop with clean logger output.
 
 **Location:** `main.py`
 
 Current capabilities include:
 
-* Fully asynchronous event loop using `asyncio`.
-* Background market data simulation.
-* Continuous market tick processing.
-* Dynamic arbitrage spread monitoring.
-* Calculation of:
+* Non-blocking `asyncio` event loop with graceful shutdown (`SIGINT` / `SIGTERM`).
+* Clean, single-stream Python standard logging using `logger.info`.
+* No stdout logging duplication.
+* Real-time calculation of Gross Spread, Estimated Fees, and Net Profit.
+* High-visibility profit detection tags:
 
-  * Gross Spread
-  * Estimated Trading Fees
-  * Net Profit Percentage
-* Detection and logging of potentially profitable opportunities.
-* Clear distinction between normal market scanning and actionable opportunities.
-* Graceful shutdown handling using:
-
-  * `SIGINT`
-  * `SIGTERM`
+  * `[PROFIT DETECTED]`
+  * `[SCANNING]`
 
 Example output:
 
 ```text
-[SCAN] BTC/USDT | Binance: 100000 | Kraken: 100150
-[PROFIT DETECTED] Net Profit: 0.35%
+2026-09-07 20:58:37,212 | INFO | arbix | [SCANNING] Cycle 2 | Pair: BTC/USDT | Buy: $100048.96 | Sell: $100272.18 | Spread: $223.22 (0.22%)
+2026-09-07 20:58:38,219 | INFO | arbix | [PROFIT DETECTED] Cycle 3 | Pair: BTC/USDT | Buy (Binance): $100044.97 | Sell (Coinbase): $100754.12 | Net Profit: $508.35 (0.51%)
 ```
 
 ---
 
-# 🏗️ Project Architecture
+## 🎯 ACTIVE PHASE: Phase 1 — Real Exchange Data Connectors
+
+This is the current target phase to make ArbiX production-ready for live markets.
+
+* [ ] **1. Async Exchange Clients:** Replace the synthetic `_market_data_simulator()` with live exchange connectors using `ccxt.pro` or native WebSockets.
+* [ ] **2. WebSocket Data Streams:** Connect to real-time L2 order book WebSocket endpoints for Binance and Coinbase Advanced.
+* [ ] **3. Order Book Synchronization:** Build an `OrderBookManager` to handle snapshot initialization and process incremental depth updates (deltas).
+* [ ] **4. Normalization Layer:** Standardize raw exchange WebSocket messages into ArbiX `OrderBook` and `OrderBookLevel` objects.
+
+---
+
+## 📌 Full Development Roadmap
+
+### Phase 1 — Real Exchange Data Connectors (IN PROGRESS)
+
+* Real-time WebSocket streaming for Binance, Coinbase, and Kraken.
+* L2 order book snapshot and delta synchronization.
+* Exchange-specific message normalization.
+* Automatic reconnection and connection health monitoring.
+* Sequence-number validation to prevent stale or corrupted order books.
+
+### Phase 2 — Dynamic Fee & Slippage Engine
+
+* Replace hardcoded fee estimates with dynamic exchange taker/maker fee tiers.
+* Depth-based slippage calculation using `ask_cost()` and `bid_proceeds()`.
+* Account for network transfer fees and withdrawal costs.
+* Calculate realistic net arbitrage profitability.
+
+### Phase 3 — Trade Execution Engine
+
+* Build an asynchronous `ExecutionEngine` for simultaneous buy/sell order placement using `asyncio.gather()`.
+* Support pre-funded balance checks on both target exchanges.
+* Add order state tracking:
+
+  * `Pending`
+  * `Filled`
+  * `Partially Filled`
+  * `Failed`
+* Implement circuit breakers.
+* Implement slippage caps.
+* Add emergency kill switches.
+* Handle exchange API failures and order execution errors.
+
+### Phase 4 — Risk & Inventory Management
+
+* Exchange balance tracking.
+* Inventory allocation between exchanges.
+* Automated rebalancing strategies.
+* Auto-hedging.
+* Exposure limits.
+* Maximum trade-size controls.
+* Risk-based opportunity filtering.
+
+### Phase 5 — Monitoring & Infrastructure
+
+* Prometheus metrics export:
+
+  * WebSocket latency
+  * Market-data latency
+  * Opportunities detected
+  * Trades executed
+  * Profit detected vs. profit realized
+  * Errors and reconnections
+* Dockerization with `Dockerfile` and `docker-compose`.
+* Centralized structured logging.
+* Health checks.
+* Alerting system via Telegram / Discord webhooks.
+* Production deployment and process supervision.
+
+---
+
+## 🏗️ Project Architecture
 
 ```text
 arbix/
 │
 ├── config/
-│   └── settings.py
-│       # Configuration management and environment variables
+│   └── settings.py              # Settings & environment configuration
 │
 ├── market_data/
-│   └── order_book.py
-│       # OrderBook and OrderBookLevel domain models
+│   └── order_book.py            # OrderBook and OrderBookLevel domain models
 │
-├── main.py
-│   # Application entry point and asynchronous simulation runner
+├── exchanges/
+│   ├── base.py                  # Exchange client interface
+│   ├── binance.py               # Binance WebSocket connector
+│   ├── coinbase.py              # Coinbase WebSocket connector
+│   └── kraken.py                # Kraken WebSocket connector
 │
-├── requirements.txt
-│   # Python dependencies
+├── synchronization/
+│   └── order_book_manager.py    # Snapshot & delta synchronization
 │
-└── README.md
-    # Project documentation
+├── normalization/
+│   └── order_book_normalizer.py # Exchange → ArbiX normalization
+│
+├── main.py                      # Pipeline entry point & asyncio event loop
+│
+├── requirements.txt             # Dependencies
+└── README.md                    # Project documentation
 ```
 
 ---
 
-# 🚦 Quick Start
+## 🚦 Quick Start
 
-## Prerequisites
-
-Before running ArbiX, make sure you have:
-
-* Python 3.10 or higher
-* Git
-
-## 1. Clone the Repository
+### 1. Clone Repository
 
 ```bash
 git clone https://github.com/gowthambharathn/ArbiX.git
 cd ArbiX
 ```
 
-## 2. Create a Virtual Environment
+### 2. Create Virtual Environment
 
 ```bash
 python -m venv venv
 ```
 
-### Windows
+**Windows:**
 
 ```bash
 venv\Scripts\activate
 ```
 
-### macOS / Linux
+**macOS/Linux:**
 
 ```bash
 source venv/bin/activate
 ```
 
-## 3. Install Dependencies
+### 3. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 4. Configure Environment Variables
-
-Create a `.env` file in the project root if required by your configuration.
-
-Example:
-
-```env
-TRADING_MODE=paper
-MIN_PROFIT_PERCENTAGE=0.2
-MAX_TRADE_AMOUNT=100
-```
-
-> **Important:** Never commit API keys or other sensitive credentials to GitHub.
-
-## 5. Run the Application
+### 4. Run Pipeline
 
 ```bash
 python main.py
 ```
 
----
-
-# 🧪 Testing
-
-ArbiX uses `pytest` for automated testing.
-
-Run the complete test suite:
+### 5. Run Automated Tests
 
 ```bash
 python -m pytest -v
 ```
 
-Run a specific test file:
+---
 
-```bash
-python -m pytest tests/test_settings.py -v
-```
+## 🔐 Trading Modes
 
-Example output:
+| Mode    | Description                                                         |
+| ------- | ------------------------------------------------------------------- |
+| `paper` | Simulates market data and trade execution without financial risk.   |
+| `live`  | Connects to real exchange APIs and executes trades with live funds. |
+
+> ⚠️ **Warning:** Cryptocurrency arbitrage carries inherent market risk. Always validate software with paper trading before deploying capital.
+
+---
+
+## 🧪 Development Principles
+
+ArbiX follows several principles to keep the system reliable and production-ready:
+
+* **Asynchronous I/O** for low-latency market-data processing.
+* **Decimal arithmetic** for financial precision.
+* **Immutable domain models** to prevent accidental state corruption.
+* **Exchange abstraction** to avoid exchange-specific logic leaking into the core domain.
+* **Normalized market data** so the arbitrage engine works with a consistent data structure.
+* **Automated testing** for domain logic and infrastructure.
+* **Graceful shutdown** for safe service termination.
+* **Paper trading first** before enabling live execution.
+
+---
+
+## 📈 Arbitrage Pipeline
 
 ```text
-============================= test session starts =============================
-collected 17 items
-
-tests/test_settings.py ................. PASSED
-
-============================== 17 passed ==============================
+                    ┌─────────────────────┐
+                    │   Exchange Streams  │
+                    └──────────┬──────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              │                │                │
+              ▼                ▼                ▼
+        ┌───────────┐    ┌───────────┐    ┌───────────┐
+        │  Binance  │    │ Coinbase  │    │  Kraken   │
+        │ WebSocket │    │ WebSocket │    │ WebSocket │
+        └─────┬─────┘    └─────┬─────┘    └─────┬─────┘
+              │                │                │
+              └────────────────┼────────────────┘
+                               ▼
+                    ┌─────────────────────┐
+                    │ OrderBookManager    │
+                    │ Snapshot + Deltas   │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Normalization Layer │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ ArbiX OrderBook     │
+                    │ Domain Model        │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Arbitrage Detector  │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Fee & Slippage      │
+                    │ Engine               │
+                    └──────────┬──────────┘
+                               │
+                               ▼
+                    ┌─────────────────────┐
+                    │ Execution Engine    │
+                    └─────────────────────┘
 ```
 
 ---
 
-# 📌 Development Roadmap
+## 🎯 Production Goal
 
-The following roadmap outlines the planned development of ArbiX from a market simulation system into a more complete arbitrage trading platform.
-
-## Phase 1 — Real Exchange Data Connectors
-
-* [ ] Replace the simulated market data pipeline with real exchange connections.
-* [ ] Integrate real-time WebSocket streams.
-* [ ] Add support for:
-
-  * Binance
-  * Coinbase Advanced
-  * Kraken
-* [ ] Evaluate `ccxt.pro` and native WebSocket implementations.
-* [ ] Implement an `OrderBookManager`.
-* [ ] Process incremental depth and delta updates.
-* [ ] Maintain synchronized L2 order books.
-
----
-
-## Phase 2 — Dynamic Fee & Slippage Engine
-
-* [ ] Replace hardcoded trading fee estimates with exchange-specific fee configurations.
-* [ ] Support different trading fee tiers.
-* [ ] Implement depth-based slippage calculations.
-* [ ] Calculate execution cost using actual order book liquidity.
-* [ ] Use:
-
-  * `ask_cost()`
-  * `bid_value()`
-  * `bid_proceeds()`
-* [ ] Account for withdrawal and network fees.
-* [ ] Calculate realistic net profitability before trade execution.
-
----
-
-## Phase 3 — Trade Execution Engine
-
-* [ ] Build an asynchronous `ExecutionEngine`.
-* [ ] Place orders across multiple exchanges.
-* [ ] Support market and limit orders.
-* [ ] Implement simultaneous or coordinated order execution.
-* [ ] Track order states:
-
-  * Pending
-  * Open
-  * Partially Filled
-  * Filled
-  * Cancelled
-  * Failed
-* [ ] Implement execution timeout handling.
-* [ ] Add retry strategies where appropriate.
-
-### Safety Mechanisms
-
-* [ ] Circuit breakers.
-* [ ] Maximum slippage limits.
-* [ ] Maximum trade size limits.
-* [ ] Daily loss limits.
-* [ ] Emergency kill switch.
-* [ ] Exchange connectivity monitoring.
-
----
-
-## Phase 4 — Risk & Inventory Management
-
-* [ ] Implement an exchange balance manager.
-* [ ] Verify available balances before executing trades.
-* [ ] Track asset inventory across exchanges.
-* [ ] Prevent trades when insufficient liquidity or balance is available.
-* [ ] Implement exchange inventory rebalancing.
-* [ ] Explore asset transfer strategies.
-* [ ] Explore hedging mechanisms using:
-
-  * Triangular arbitrage
-  * Perpetual futures
-  * Cross-exchange hedging
-
----
-
-## Phase 5 — Monitoring, Metrics & Infrastructure
-
-* [ ] Add Prometheus metrics.
-* [ ] Track:
-
-  * Market data latency
-  * Order book update latency
-  * Detected spread percentage
-  * Net expected profit
-  * Executed trades
-  * Trade PnL
-  * System errors
-* [ ] Create monitoring dashboards.
-* [ ] Dockerize the application.
-* [ ] Add `docker-compose` for local deployment.
-* [ ] Implement structured logging.
-* [ ] Add persistent trade history.
-* [ ] Set up alerts through:
-
-  * Telegram
-  * Discord
-  * Webhooks
-
----
-
-# 🔐 Trading Modes
-
-ArbiX is designed to support multiple trading modes.
-
-| Mode    | Description                                                     |
-| ------- | --------------------------------------------------------------- |
-| `paper` | Simulates trades without using real funds.                      |
-| `live`  | Executes real trades using configured exchange API credentials. |
-
-> ⚠️ **Warning:** Live trading involves financial risk. Thorough testing, risk management, and validation should be completed before connecting the system to real funds.
-
----
-
-# 🛠️ Technology Stack
-
-* **Python**
-* **Asyncio**
-* **Decimal**
-* **Pytest**
-* **Python Dotenv**
-* **WebSockets** *(planned)*
-* **CCXT / CCXT Pro** *(planned)*
-* **Prometheus** *(planned)*
-* **Docker** *(planned)*
-
----
-
-# 🎯 Project Goals
-
-The goal of ArbiX is to build a modular and scalable arbitrage trading architecture capable of:
+The ultimate goal of ArbiX is to build a reliable, low-latency, production-grade cryptocurrency arbitrage platform capable of:
 
 1. Receiving real-time market data from multiple exchanges.
-2. Normalizing exchange-specific order book formats.
-3. Detecting profitable cross-exchange price differences.
+2. Maintaining synchronized L2 order books.
+3. Detecting cross-exchange arbitrage opportunities.
 4. Calculating realistic profitability after fees and slippage.
-5. Managing exchange balances and risk.
-6. Executing trades with low latency.
-7. Monitoring performance and system health.
-8. Supporting safe paper trading before live deployment.
+5. Executing simultaneous buy/sell orders.
+6. Managing balances, inventory, and risk.
+7. Monitoring system health and trading performance.
 
----
-
-# ⚠️ Disclaimer
-
-ArbiX is an experimental software project intended for educational and research purposes.
-
-Cryptocurrency trading involves significant financial risk. The software does not guarantee profitability, and the authors are not responsible for financial losses resulting from the use of this project.
-
-Always test strategies using paper trading before considering live execution.
-
----
-
-# 📄 License
-
-This project is licensed under the MIT License.
-
-See the `LICENSE` file for more information.
-
----
-
-# 🤝 Contributing
-
-Contributions, suggestions, and improvements are welcome.
-
-To contribute:
-
-```bash
-# Fork the repository
-
-# Create a feature branch
-git checkout -b feature/your-feature-name
-
-# Commit your changes
-git commit -m "Add your feature"
-
-# Push your branch
-git push origin feature/your-feature-name
-```
-
-Then open a Pull Request.
+The system will initially operate in **paper trading mode** before any live capital is exposed.
 
 ---
 
@@ -384,4 +312,6 @@ Then open a Pull Request.
 
 Android Developer • Python Developer • AI/ML Enthusiast
 
-Building scalable software, intelligent systems, and exploring algorithmic trading and machine learning.
+---
+
+⭐ If you find ArbiX interesting, consider starring the repository.

@@ -80,12 +80,11 @@ class ArbiXApplication:
 
                     if net_profit > 0 and net_pct >= min_profit_pct:
                         msg = (
-                            f"[PROFIT DETECTED] Cycle {cycle} | Pair: BTC/USDT | "
+                            f"\033[92m[PROFIT DETECTED] Cycle {cycle} | Pair: BTC/USDT | "
                             f"Buy (Binance): ${best_buy_price:.2f} | Sell (Coinbase): ${best_sell_price:.2f} | "
-                            f"Net Profit: ${net_profit:.2f} ({net_pct:.2f}%)"
+                            f"Net Profit: ${net_profit:.2f} ({net_pct:.2f}%)\033[0m"
                         )
                         logger.info(msg)
-                        print(f"\033[92m{msg}\033[0m", flush=True)  # Green text output
                     else:
                         msg = (
                             f"[SCANNING] Cycle {cycle} | Pair: BTC/USDT | "
@@ -93,10 +92,9 @@ class ArbiXApplication:
                             f"Spread: ${gross_spread:.2f} ({gross_pct:.2f}%)"
                         )
                         logger.info(msg)
-                        print(msg, flush=True)
 
             except Exception as e:
-                print(f"[ERROR in Simulator]: {e}", flush=True)
+                logger.error(f"[ERROR in Simulator]: {e}")
 
             await asyncio.sleep(1)
 
@@ -106,7 +104,7 @@ class ArbiXApplication:
             return
 
         self._running = True
-        print("=== ArbiX Pipeline Started ===", flush=True)
+        logger.info("=== ArbiX Pipeline Started ===")
 
         sim_task = asyncio.create_task(self._market_data_simulator())
         self._tasks.append(sim_task)
@@ -122,7 +120,7 @@ class ArbiXApplication:
         if not self._running:
             return
 
-        print("\nShutting down ArbiX...", flush=True)
+        logger.info("Shutting down ArbiX...")
         self._running = False
 
         for task in self._tasks:
@@ -131,7 +129,7 @@ class ArbiXApplication:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
-        print("ArbiX shutdown completed.", flush=True)
+        logger.info("ArbiX shutdown completed.")
 
     def request_shutdown(self) -> None:
         if not self._shutdown_event.is_set():
@@ -143,6 +141,7 @@ def configure_logging(settings: Settings) -> None:
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         stream=sys.stdout,
+        force=True,
     )
 
 
