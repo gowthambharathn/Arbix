@@ -1,26 +1,25 @@
 """
-ArbiX Application Entry Point.
+ArbiX Application Entry Point — Live WebSocket Engine.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import random
 import signal
 import sys
 import time
-from decimal import Decimal
 from types import FrameType
 
 from config.settings import Settings, load_settings
+from market_data.connectors import BinanceConnector, CoinbaseConnector
 from market_data.order_book import OrderBook, create_order_book
 
 logger = logging.getLogger("arbix")
 
 
 class ArbiXApplication:
-    """Main ArbiX pipeline runner with real-time price monitoring simulation."""
+    """Main ArbiX pipeline runner with live WebSocket pricing."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -32,82 +31,71 @@ class ArbiXApplication:
         self.binance_book: OrderBook = create_order_book("BTC/USDT", [], [], now)
         self.coinbase_book: OrderBook = create_order_book("BTC/USDT", [], [], now)
 
-    async def _market_data_simulator(self) -> None:
-        """Simulates price ticks and checks for real-time arbitrage spreads."""
-        base_btc_price = 100000.0
-        cycle = 0
+        # Connectors
+        self.binance_conn = BinanceConnector(symbol="BTC/USDT")
+        self.coinbase_conn = CoinbaseConnector(symbol="BTC/USDT")
 
-        while self._running:
-            try:
-                cycle += 1
-                now = time.time()
+        # Callbacks
+        self.binance_conn.register_callback(self._on_binance_update)
+        self.coinbase_conn.register_callback(self._on_coinbase_update)
 
-                # Generate dynamic spread opportunities
-                binance_ask = base_btc_price + random.uniform(-100, 50)
-                coinbase_bid = base_btc_price + random.uniform(200, 800)
+        self._cycle = 0
 
-                # Re-create fresh immutable order books each tick
-                self.binance_book = create_order_book(
-                    symbol="BTC/USDT",
-                    bids=[(binance_ask - 10, 2.0)],
-                    asks=[(binance_ask, 2.0)],
-                    timestamp=now,
-                )
+    async def _on_binance_update(self, book: OrderBook) -> None:
+        self.binance_book = book
+        await self._check_arbitrage()
 
-                self.coinbase_book = create_order_book(
-                    symbol="BTC/USDT",
-                    bids=[(coinbase_bid, 2.0)],
-                    asks=[(coinbase_bid + 10, 2.0)],
-                    timestamp=now,
-                )
+    async def _on_coinbase_update(self, book: OrderBook) -> None:
+        self.coinbase_book = book
+        await self._check_arbitrage()
 
-                best_buy = self.binance_book.best_ask
-                best_sell = self.coinbase_book.best_bid
+    async def _check_arbitrage(self) -> None:
+        """Calculates current spread between Binance and Coinbase order books."""
+        best_buy = self.binance_book.best_ask
+        best_sell = self.coinbase_book.best_bid
 
-                if best_buy and best_sell:
-                    best_buy_price = float(best_buy.price)
-                    best_sell_price = float(best_sell.price)
+        if not best_buy or not best_sell:
+            return
 
-                    gross_spread = best_sell_price - best_buy_price
-                    gross_pct = (gross_spread / best_buy_price) * 100
+        self._cycle += 1
+        best_buy_price = float(best_buy.price)
+        best_sell_price = float(best_sell.price)
 
-                    # Standard combined trading fee (~0.20%)
-                    estimated_fees = (best_buy_price * 0.001) + (best_sell_price * 0.001)
-                    net_profit = gross_spread - estimated_fees
-                    net_pct = (net_profit / best_buy_price) * 100
+        gross_spread = best_sell_price - best_buy_price
+        gross_pct = (gross_spread / best_buy_price) * 100 if best_buy_price else 0.0
 
-                    min_profit_pct = float(getattr(self.settings, "min_profit_percentage", 0.20))
+        # Estimated combined fees (~0.20%)
+        estimated_fees = (best_buy_price * 0.001) + (best_sell_price * 0.001)
+        net_profit = gross_spread - estimated_fees
+        net_pct = (net_profit / best_buy_price) * 100 if best_buy_price else 0.0
 
-                    if net_profit > 0 and net_pct >= min_profit_pct:
-                        msg = (
-                            f"\033[92m[PROFIT DETECTED] Cycle {cycle} | Pair: BTC/USDT | "
-                            f"Buy (Binance): ${best_buy_price:.2f} | Sell (Coinbase): ${best_sell_price:.2f} | "
-                            f"Net Profit: ${net_profit:.2f} ({net_pct:.2f}%)\033[0m"
-                        )
-                        logger.info(msg)
-                    else:
-                        msg = (
-                            f"[SCANNING] Cycle {cycle} | Pair: BTC/USDT | "
-                            f"Buy: ${best_buy_price:.2f} | Sell: ${best_sell_price:.2f} | "
-                            f"Spread: ${gross_spread:.2f} ({gross_pct:.2f}%)"
-                        )
-                        logger.info(msg)
+        min_profit_pct = float(getattr(self.settings, "min_profit_percentage", 0.20))
 
-            except Exception as e:
-                logger.error(f"[ERROR in Simulator]: {e}")
-
-            await asyncio.sleep(1)
+        if net_profit > 0 and net_pct >= min_profit_pct:
+            msg = (
+                f"\033[92m[LIVE PROFIT DETECTED] Cycle {self._cycle} | Pair: BTC/USDT | "
+                f"Buy (Binance): ${best_buy_price:.2f} | Sell (Coinbase): ${best_sell_price:.2f} | "
+                f"Net Profit: ${net_profit:.2f} ({net_pct:.2f}%)\033[0m"
+            )
+            logger.info(msg)
+        else:
+            msg = (
+                f"[LIVE SCANNING] Cycle {self._cycle} | Pair: BTC/USDT | "
+                f"Buy: ${best_buy_price:.2f} | Sell: ${best_sell_price:.2f} | "
+                f"Spread: ${gross_spread:.2f} ({gross_pct:.2f}%)"
+            )
+            logger.info(msg)
 
     async def start(self) -> None:
-        """Start the pipeline."""
+        """Start WebSocket connections."""
         if self._running:
             return
 
         self._running = True
-        logger.info("=== ArbiX Pipeline Started ===")
+        logger.info("=== ArbiX Live Pipeline Started ===")
 
-        sim_task = asyncio.create_task(self._market_data_simulator())
-        self._tasks.append(sim_task)
+        self._tasks.append(asyncio.create_task(self.binance_conn.connect()))
+        self._tasks.append(asyncio.create_task(self.coinbase_conn.connect()))
 
     async def run(self) -> None:
         await self.start()
@@ -120,8 +108,11 @@ class ArbiXApplication:
         if not self._running:
             return
 
-        logger.info("Shutting down ArbiX...")
+        logger.info("Shutting down ArbiX connectors...")
         self._running = False
+
+        await self.binance_conn.close()
+        await self.coinbase_conn.close()
 
         for task in self._tasks:
             task.cancel()
@@ -129,7 +120,7 @@ class ArbiXApplication:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
-        logger.info("ArbiX shutdown completed.")
+        logger.info("ArbiX pipeline safely terminated.")
 
     def request_shutdown(self) -> None:
         if not self._shutdown_event.is_set():
