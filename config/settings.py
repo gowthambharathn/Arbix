@@ -13,7 +13,6 @@ from enum import Enum
 
 from dotenv import load_dotenv
 
-
 load_dotenv()
 
 
@@ -28,13 +27,16 @@ class TradingMode(str, Enum):
 class Settings:
     """Application-wide configuration for ArbiX."""
 
+    symbol: str
+    trading_mode: TradingMode
+
     exchange_api_key: str
     exchange_api_secret: str
 
-    trading_mode: TradingMode
-
     min_profit_percentage: float
     max_trade_amount: float
+    paper_balance_usdt: float
+    taker_fee: float
 
     def validate(self) -> None:
         """Validate application configuration."""
@@ -47,6 +49,11 @@ class Settings:
         if self.max_trade_amount <= 0:
             raise ValueError(
                 "MAX_TRADE_AMOUNT must be greater than zero."
+            )
+
+        if self.paper_balance_usdt <= 0:
+            raise ValueError(
+                "PAPER_BALANCE_USDT must be greater than zero."
             )
 
         if self.trading_mode == TradingMode.LIVE:
@@ -80,14 +87,21 @@ def load_settings() -> Settings:
     """Load application settings from environment variables."""
 
     settings = Settings(
+        symbol=os.getenv("TRADING_SYMBOL", "BTC/USDT"),
+        trading_mode=_get_trading_mode(),
         exchange_api_key=os.getenv("EXCHANGE_API_KEY", ""),
         exchange_api_secret=os.getenv("EXCHANGE_API_SECRET", ""),
-        trading_mode=_get_trading_mode(),
         min_profit_percentage=float(
             os.getenv("MIN_PROFIT_PERCENTAGE", "0.20")
         ),
         max_trade_amount=float(
-            os.getenv("MAX_TRADE_AMOUNT", "100")
+            os.getenv("MAX_TRADE_AMOUNT", "100.0")
+        ),
+        paper_balance_usdt=float(
+            os.getenv("PAPER_BALANCE_USDT", "1000.0")
+        ),
+        taker_fee=float(
+            os.getenv("TAKER_FEE", "0.001")
         ),
     )
 
@@ -96,4 +110,5 @@ def load_settings() -> Settings:
     return settings
 
 
+# Global settings instance
 settings = load_settings()

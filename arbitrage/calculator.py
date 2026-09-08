@@ -11,15 +11,14 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
 
+from config.settings import settings
 from market_data.order_book import OrderBook
 from arbitrage.opportunity import ArbitrageOpportunity
 
 
 @dataclass(frozen=True)
 class ProfitabilityResult:
-    """
-    Represents the estimated financial outcome of an arbitrage trade.
-    """
+    """Represents the estimated financial outcome of an arbitrage trade."""
 
     quantity: Decimal
 
@@ -55,99 +54,64 @@ class InsufficientLiquidityError(ProfitabilityCalculationError):
 class ProfitabilityCalculator:
     """
     Calculates the estimated net profitability of an arbitrage trade.
-
-    The calculator does not execute trades and does not make risk
-    decisions. It only evaluates the expected financial result.
     """
 
     def __init__(
         self,
-        transfer_cost: Decimal = Decimal("0"),
-        other_costs: Decimal = Decimal("0"),
+        transfer_cost: Optional[Decimal] = None,
+        other_costs: Optional[Decimal] = None,
+        min_profit_percentage: Optional[Decimal] = None,
     ) -> None:
-        if transfer_cost < 0:
-            raise ValueError(
-                "Transfer cost cannot be negative."
-            )
+        self.transfer_cost = transfer_cost if transfer_cost is not None else Decimal("0")
+        self.other_costs = other_costs if other_costs is not None else Decimal("0")
+        self.min_profit_percentage = (
+            min_profit_percentage
+            if min_profit_percentage is not None
+            else Decimal(str(settings.min_profit_percentage))
+        )
 
-        if other_costs < 0:
-            raise ValueError(
-                "Other costs cannot be negative."
-            )
+        if self.transfer_cost < 0:
+            raise ValueError("Transfer cost cannot be negative.")
 
-        self.transfer_cost = transfer_cost
-        self.other_costs = other_costs
+        if self.other_costs < 0:
+            raise ValueError("Other costs cannot be negative.")
 
     def calculate(
         self,
         opportunity: ArbitrageOpportunity,
         buy_order_book: OrderBook,
         sell_order_book: OrderBook,
-        quantity: Decimal,
-        buy_fee_rate: Decimal,
-        sell_fee_rate: Decimal,
+        quantity: Optional[Decimal] = None,
+        buy_fee_rate: Optional[Decimal] = None,
+        sell_fee_rate: Optional[Decimal] = None,
     ) -> ProfitabilityResult:
-        """
-        Calculate estimated arbitrage profitability.
+        """Calculate estimated arbitrage profitability using system settings default overrides."""
 
-        Args:
-            opportunity:
-                Detected arbitrage opportunity.
-
-            buy_order_book:
-                Order book of the exchange where the asset is purchased.
-
-            sell_order_book:
-                Order book of the exchange where the asset is sold.
-
-            quantity:
-                Quantity of the base asset to trade.
-
-            buy_fee_rate:
-                Buy-side trading fee as a decimal rate.
-                Example: 0.001 = 0.1%.
-
-            sell_fee_rate:
-                Sell-side trading fee as a decimal rate.
-                Example: 0.001 = 0.1%.
-
-        Returns:
-            Detailed profitability result.
-
-        Raises:
-            ProfitabilityCalculationError:
-                If the supplied market data is inconsistent.
-
-            InsufficientLiquidityError:
-                If either order book cannot execute the requested quantity.
-        """
+        trade_qty = quantity if quantity is not None else Decimal(str(settings.max_trade_amount))
+        buy_fee = buy_fee_rate if buy_fee_rate is not None else Decimal(str(settings.taker_fee))
+        sell_fee = sell_fee_rate if sell_fee_rate is not None else Decimal(str(settings.taker_fee))
 
         self._validate_inputs(
             opportunity=opportunity,
             buy_order_book=buy_order_book,
             sell_order_book=sell_order_book,
-            quantity=quantity,
-            buy_fee_rate=buy_fee_rate,
-            sell_fee_rate=sell_fee_rate,
+            quantity=trade_qty,
+            buy_fee_rate=buy_fee,
+            sell_fee_rate=sell_fee,
         )
 
         buying_cost = self._calculate_buying_cost(
             order_book=buy_order_book,
-            quantity=quantity,
+            quantity=trade_qty,
         )
 
         selling_value = self._calculate_selling_value(
             order_book=sell_order_book,
-            quantity=quantity,
+            quantity=trade_qty,
         )
 
-        buy_reference_cost = (
-            opportunity.buy_price * quantity
-        )
-
-        sell_reference_value = (
-            opportunity.sell_price * quantity
-        )
+        buy_reference_cost = opportunity.buy_price * trade_qty
+        sell_reference_value = opportunity.sell_price * trade_qty
 
         buy_slippage = max(
             Decimal("0"),
@@ -159,14 +123,14 @@ class ProfitabilityCalculator:
             sell_reference_value - selling_value,
         )
 
-        buy_fee = buying_cost * buy_fee_rate
-        sell_fee = selling_value * sell_fee_rate
+        calculated_buy_fee = buying_cost * buy_fee
+        calculated_sell_fee = selling_value * sell_fee
 
         gross_profit = selling_value - buying_cost
 
         total_costs = (
-            buy_fee
-            + sell_fee
+            calculated_buy_fee
+            + calculated_sell_fee
             + buy_slippage
             + sell_slippage
             + self.transfer_cost
@@ -174,29 +138,31 @@ class ProfitabilityCalculator:
         )
 
         net_profit = gross_profit - (
-            buy_fee
-            + sell_fee
+            calculated_buy_fee
+            + calculated_sell_fee
             + self.transfer_cost
             + self.other_costs
         )
 
-        total_investment = buying_cost + buy_fee
+        total_investment = buying_cost + calculated_buy_fee
 
         if total_investment > 0:
             net_profit_percentage = (
-                net_profit
-                / total_investment
-                * Decimal("100")
+                net_profit / total_investment * Decimal("100")
             )
         else:
             net_profit_percentage = Decimal("0")
 
+        is_profitable = (
+            net_profit > 0 and net_profit_percentage >= self.min_profit_percentage
+        )
+
         return ProfitabilityResult(
-            quantity=quantity,
+            quantity=trade_qty,
             buying_cost=buying_cost,
             selling_value=selling_value,
-            buy_fee=buy_fee,
-            sell_fee=sell_fee,
+            buy_fee=calculated_buy_fee,
+            sell_fee=calculated_sell_fee,
             buy_slippage=buy_slippage,
             sell_slippage=sell_slippage,
             transfer_cost=self.transfer_cost,
@@ -205,7 +171,7 @@ class ProfitabilityCalculator:
             total_costs=total_costs,
             net_profit=net_profit,
             net_profit_percentage=net_profit_percentage,
-            is_profitable=net_profit > 0,
+            is_profitable=is_profitable,
         )
 
     @staticmethod
@@ -213,13 +179,6 @@ class ProfitabilityCalculator:
         order_book: OrderBook,
         quantity: Decimal,
     ) -> Decimal:
-        """
-        Calculate the actual cost of buying the requested quantity.
-
-        The calculation consumes ask levels from the cheapest available
-        price upward.
-        """
-
         try:
             return order_book.ask_cost(quantity)
         except ValueError as error:
@@ -233,13 +192,6 @@ class ProfitabilityCalculator:
         order_book: OrderBook,
         quantity: Decimal,
     ) -> Decimal:
-        """
-        Calculate the actual value received from selling the quantity.
-
-        The calculation consumes bid levels from the highest available
-        price downward.
-        """
-
         try:
             return order_book.bid_proceeds(quantity)
         except ValueError as error:
@@ -257,22 +209,14 @@ class ProfitabilityCalculator:
         buy_fee_rate: Decimal,
         sell_fee_rate: Decimal,
     ) -> None:
-        """Validate all calculator inputs."""
-
         if quantity <= 0:
-            raise ValueError(
-                "Trade quantity must be greater than zero."
-            )
+            raise ValueError("Trade quantity must be greater than zero.")
 
         if buy_fee_rate < 0:
-            raise ValueError(
-                "Buy fee rate cannot be negative."
-            )
+            raise ValueError("Buy fee rate cannot be negative.")
 
         if sell_fee_rate < 0:
-            raise ValueError(
-                "Sell fee rate cannot be negative."
-            )
+            raise ValueError("Sell fee rate cannot be negative.")
 
         if buy_order_book.symbol != opportunity.symbol:
             raise ProfitabilityCalculationError(
