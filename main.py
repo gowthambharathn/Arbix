@@ -1,173 +1,131 @@
 """
-ArbiX Application Entry Point — Live WebSocket Engine.
+ArbiX Arbitrage Bot Main Entry Point
+
+Coordinates order book WebSocket streaming, scans for opportunities,
+evaluates profitability, and simulates paper trade executions.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import signal
 import sys
-import time
-from types import FrameType
+from decimal import Decimal
 
-from config.settings import Settings, load_settings
-from market_data.connectors import BinanceConnector, CoinbaseConnector
-from market_data.order_book import OrderBook, create_order_book
+from arbitrage.calculator import ProfitabilityCalculator
+from arbitrage.finder import ArbitrageFinder
+from config.settings import settings
+from engine.paper_engine import PaperEngine
+from market_data.streamer import MarketDataStreamer
 
-logger = logging.getLogger("arbix")
+# Configure Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger("ArbiX.Main")
 
 
-class ArbiXApplication:
-    """Main ArbiX pipeline runner with live WebSocket pricing."""
+async def run_arbitrage_loop(
+    streamer: MarketDataStreamer,
+    finder: ArbitrageFinder,
+    engine: PaperEngine,
+    interval_seconds: float = 0.5,
+) -> None:
+    """Periodically check active order books and execute profitable trades."""
+    logger.info("Starting arbitrage evaluation loop...")
+    heartbeat_counter = 0
 
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
-        self._shutdown_event = asyncio.Event()
-        self._running = False
-        self._tasks: list[asyncio.Task] = []
+    try:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            heartbeat_counter += 1
 
-        now = time.time()
-        self.binance_book: OrderBook = create_order_book("BTC/USDT", [], [], now)
-        self.coinbase_book: OrderBook = create_order_book("BTC/USDT", [], [], now)
+            active_books_count = len(streamer.order_books)
 
-        # Connectors
-        self.binance_conn = BinanceConnector(symbol="BTC/USDT")
-        self.coinbase_conn = CoinbaseConnector(symbol="BTC/USDT")
+            # Log heartbeat every ~10 seconds (20 iterations at 0.5s)
+            if heartbeat_counter % 20 == 0:
+                cached_exchanges = list(streamer.order_books.keys())
+                logger.info(
+                    f"Heartbeat | Cached Order Books ({active_books_count}/{len(streamer.exchanges_instances)}): "
+                    f"{cached_exchanges}"
+                )
 
-        # Callbacks
-        self.binance_conn.register_callback(self._on_binance_update)
-        self.coinbase_conn.register_callback(self._on_coinbase_update)
+            if active_books_count < 2:
+                continue
 
-        self._cycle = 0
-
-    async def _on_binance_update(self, book: OrderBook) -> None:
-        self.binance_book = book
-        await self._check_arbitrage()
-
-    async def _on_coinbase_update(self, book: OrderBook) -> None:
-        self.coinbase_book = book
-        await self._check_arbitrage()
-
-    async def _check_arbitrage(self) -> None:
-        """Calculates current spread between Binance and Coinbase order books."""
-        best_buy = self.binance_book.best_ask
-        best_sell = self.coinbase_book.best_bid
-
-        if not best_buy or not best_sell:
-            return
-
-        self._cycle += 1
-        best_buy_price = float(best_buy.price)
-        best_sell_price = float(best_sell.price)
-
-        gross_spread = best_sell_price - best_buy_price
-        gross_pct = (gross_spread / best_buy_price) * 100 if best_buy_price else 0.0
-
-        # Estimated combined fees (~0.20%)
-        estimated_fees = (best_buy_price * 0.001) + (best_sell_price * 0.001)
-        net_profit = gross_spread - estimated_fees
-        net_pct = (net_profit / best_buy_price) * 100 if best_buy_price else 0.0
-
-        min_profit_pct = float(getattr(self.settings, "min_profit_percentage", 0.20))
-
-        if net_profit > 0 and net_pct >= min_profit_pct:
-            msg = (
-                f"\033[92m[LIVE PROFIT DETECTED] Cycle {self._cycle} | Pair: BTC/USDT | "
-                f"Buy (Binance): ${best_buy_price:.2f} | Sell (Coinbase): ${best_sell_price:.2f} | "
-                f"Net Profit: ${net_profit:.2f} ({net_pct:.2f}%)\033[0m"
+            # Scan order books for profitable arbitrage opportunities
+            opportunities = finder.find_opportunities(
+                order_books=streamer.order_books,
+                trade_quantity=Decimal(str(settings.max_trade_amount)),
             )
-            logger.info(msg)
-        else:
-            msg = (
-                f"[LIVE SCANNING] Cycle {self._cycle} | Pair: BTC/USDT | "
-                f"Buy: ${best_buy_price:.2f} | Sell: ${best_sell_price:.2f} | "
-                f"Spread: ${gross_spread:.2f} ({gross_pct:.2f}%)"
-            )
-            logger.info(msg)
 
-    async def start(self) -> None:
-        """Start WebSocket connections."""
-        if self._running:
-            return
+            for opportunity, result in opportunities:
+                logger.info(
+                    f"Found Opportunity | Route: {opportunity.buy_exchange} -> {opportunity.sell_exchange} | "
+                    f"Gross Profit: ${result.gross_profit:.2f} | Net Profit: ${result.net_profit:.2f} "
+                    f"({result.net_profit_percentage:.2f}%)"
+                )
 
-        self._running = True
-        logger.info("=== ArbiX Live Pipeline Started ===")
+                # Execute via paper engine
+                record = engine.execute_arbitrage(
+                    opportunity=opportunity,
+                    result=result,
+                )
 
-        self._tasks.append(asyncio.create_task(self.binance_conn.connect()))
-        self._tasks.append(asyncio.create_task(self.coinbase_conn.connect()))
+                if record:
+                    summary = engine.get_performance_summary()
+                    logger.info(
+                        f"Performance Summary | Executed Trades: {summary['total_trades']} | "
+                        f"Cumulative Profit: ${summary['total_net_profit']:.2f} | "
+                        f"Current USDT Balance: ${summary['usdt_balance']:.2f}"
+                    )
 
-    async def run(self) -> None:
-        await self.start()
-        try:
-            await self._shutdown_event.wait()
-        finally:
-            await self.shutdown()
-
-    async def shutdown(self) -> None:
-        if not self._running:
-            return
-
-        logger.info("Shutting down ArbiX connectors...")
-        self._running = False
-
-        await self.binance_conn.close()
-        await self.coinbase_conn.close()
-
-        for task in self._tasks:
-            task.cancel()
-
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-
-        logger.info("ArbiX pipeline safely terminated.")
-
-    def request_shutdown(self) -> None:
-        if not self._shutdown_event.is_set():
-            self._shutdown_event.set()
+    except asyncio.CancelledError:
+        logger.info("Arbitrage loop cancelled.")
 
 
-def configure_logging(settings: Settings) -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        stream=sys.stdout,
-        force=True,
+async def main() -> None:
+    """Main application lifecycle manager."""
+    exchanges = settings.exchanges
+    symbol = settings.symbol
+
+    logger.info(
+        f"Initializing ArbiX Bot | Symbol: {symbol} | Exchanges: {exchanges}"
     )
 
+    calculator = ProfitabilityCalculator()
+    finder = ArbitrageFinder(calculator=calculator)
+    engine = PaperEngine()
 
-def install_signal_handlers(application: ArbiXApplication) -> None:
-    loop = asyncio.get_running_loop()
+    streamer = MarketDataStreamer(exchanges=exchanges, symbol=symbol)
 
-    def handle_signal(signum: int, frame: FrameType | None = None) -> None:
-        application.request_shutdown()
+    # Launch streaming tasks per exchange
+    stream_tasks = [
+        asyncio.create_task(streamer.watch_exchange_order_book(ex_name))
+        for ex_name in streamer.exchanges_instances.keys()
+    ]
 
-    for signal_name in ("SIGINT", "SIGTERM"):
-        signal_value = getattr(signal, signal_name, None)
-        if signal_value is not None:
-            try:
-                loop.add_signal_handler(signal_value, handle_signal, signal_value)
-            except (NotImplementedError, AttributeError):
-                try:
-                    signal.signal(signal_value, handle_signal)
-                except (ValueError, OSError):
-                    pass
+    # Launch trade evaluation loop
+    eval_task = asyncio.create_task(
+        run_arbitrage_loop(streamer=streamer, finder=finder, engine=engine)
+    )
 
-
-async def async_main() -> None:
-    settings = load_settings()
-    configure_logging(settings)
-    application = ArbiXApplication(settings=settings)
-    install_signal_handlers(application)
-    await application.run()
-
-
-def main() -> None:
     try:
-        asyncio.run(async_main())
+        await asyncio.gather(*stream_tasks, eval_task)
     except KeyboardInterrupt:
-        print("\nArbiX interrupted by user.", flush=True)
+        logger.info("Shutting down ArbiX engine...")
+    finally:
+        eval_task.cancel()
+        for task in stream_tasks:
+            task.cancel()
+        await streamer.close_all()
+        logger.info("Clean shutdown complete.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass

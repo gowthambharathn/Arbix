@@ -8,8 +8,9 @@ cryptocurrency arbitrage trading system.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import List
 
 from dotenv import load_dotenv
 
@@ -28,6 +29,7 @@ class Settings:
     """Application-wide configuration for ArbiX."""
 
     symbol: str
+    exchanges: List[str]
     trading_mode: TradingMode
 
     exchange_api_key: str
@@ -40,6 +42,11 @@ class Settings:
 
     def validate(self) -> None:
         """Validate application configuration."""
+
+        if not self.exchanges:
+            raise ValueError(
+                "EXCHANGES list cannot be empty."
+            )
 
         if self.min_profit_percentage < 0:
             raise ValueError(
@@ -83,11 +90,19 @@ def _get_trading_mode() -> TradingMode:
         ) from error
 
 
+def _get_exchanges() -> List[str]:
+    """Parse active exchanges list from environment variables."""
+
+    raw_exchanges = os.getenv("EXCHANGES", "binance,kraken,bybit")
+    return [e.strip().lower() for e in raw_exchanges.split(",") if e.strip()]
+
+
 def load_settings() -> Settings:
     """Load application settings from environment variables."""
 
     settings = Settings(
         symbol=os.getenv("TRADING_SYMBOL", "BTC/USDT"),
+        exchanges=_get_exchanges(),
         trading_mode=_get_trading_mode(),
         exchange_api_key=os.getenv("EXCHANGE_API_KEY", ""),
         exchange_api_secret=os.getenv("EXCHANGE_API_SECRET", ""),

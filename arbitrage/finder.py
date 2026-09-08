@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from typing import Dict, List, Optional
+import time
 
 from arbitrage.calculator import ProfitabilityCalculator, ProfitabilityResult
 from arbitrage.opportunity import ArbitrageOpportunity
@@ -58,19 +59,22 @@ class ArbitrageFinder:
                     if not b_book.asks or not s_book.bids:
                         continue
 
-                    buy_price = Decimal(str(b_book.asks[0][0]))
-                    sell_price = Decimal(str(s_book.bids[0][0]))
+                    # Access the .price attribute directly on OrderBookLevel objects
+                    buy_price = b_book.asks[0].price
+                    sell_price = s_book.bids[0].price
 
                     # Raw spread check before full depth computation
                     if sell_price <= buy_price:
                         continue
 
+                    # ... inside finder.py loop ...
                     opportunity = ArbitrageOpportunity(
                         symbol=b_book.symbol,
                         buy_exchange=source_ex,
                         sell_exchange=target_ex,
                         buy_price=buy_price,
                         sell_price=sell_price,
+                        detected_at=time.time(),
                     )
 
                     try:
