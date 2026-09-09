@@ -1,96 +1,118 @@
 """
-ArbiX Arbitrage Opportunity Finder
+ArbiX Arbitrage Finder
 
-Scans order books across exchanges to identify profitable opportunities.
+Evaluates real-time order books across exchanges to find gross and net spread opportunities.
 """
 
 from __future__ import annotations
 
-from decimal import Decimal
-from typing import Dict, List, Optional
-import time
+import logging
+from typing import Dict, List, Optional, Tuple
 
-from arbitrage.calculator import ProfitabilityCalculator, ProfitabilityResult
-from arbitrage.opportunity import ArbitrageOpportunity
-from market_data.order_book import OrderBook
+import config.settings as settings
+
+logger = logging.getLogger("ArbiX.Finder")
+
+# Resolve parameters safely from settings
+MIN_PROFIT_PERCENTAGE = getattr(settings, "MIN_PROFIT_PERCENTAGE", getattr(settings, "MIN_PROFIT_THRESHOLD", 0.20))
+TOTAL_TAKER_FEE_PERCENTAGE = getattr(settings, "TOTAL_TAKER_FEE_PERCENTAGE", getattr(settings, "TOTAL_FEE_PERCENTAGE", 0.20))
 
 
-class ArbitrageFinder:
-    """
-    Scans live order books across multiple exchanges to identify and rank
-    profitable cross-exchange arbitrage opportunities.
-    """
+class ArbitrageOpportunity:
+    """Represents an evaluated arbitrage opportunity."""
 
     def __init__(
         self,
-        calculator: Optional[ProfitabilityCalculator] = None,
+        symbol: str,
+        buy_exchange: str,
+        sell_exchange: str,
+        buy_price: float,
+        sell_price: float,
+        gross_spread: float,
+        gross_spread_pct: float,
+        net_spread_pct: float,
+        is_profitable: bool,
     ) -> None:
-        self.calculator = calculator or ProfitabilityCalculator()
+        self.symbol = symbol
+        self.buy_exchange = buy_exchange
+        self.sell_exchange = sell_exchange
+        self.buy_price = buy_price
+        self.sell_price = sell_price
+        self.gross_spread = gross_spread
+        self.gross_spread_pct = gross_spread_pct
+        self.net_spread_pct = net_spread_pct
+        self.is_profitable = is_profitable
 
-    def find_opportunities(
-        self,
-        order_books: Dict[str, OrderBook],
-        trade_quantity: Optional[Decimal] = None,
-    ) -> List[tuple[ArbitrageOpportunity, ProfitabilityResult]]:
-        """
-        Compare order books across exchanges for a target trading pair.
 
-        Args:
-            order_books: A dictionary mapping exchange names to their OrderBook objects.
-            trade_quantity: Quantity to evaluate (uses settings default if None).
+def _extract_price(level: object) -> Optional[float]:
+    """Extracts numeric price from an OrderBookLevel object, tuple, dict, or float."""
+    if level is None:
+        return None
+    if isinstance(level, (int, float)):
+        return float(level)
+    if hasattr(level, "price"):
+        return float(level.price)
+    if isinstance(level, (list, tuple)) and len(level) > 0:
+        return float(level[0])
+    if isinstance(level, dict) and "price" in level:
+        return float(level["price"])
+    return None
 
-        Returns:
-            A list of tuples containing detected opportunities paired with their profitability results,
-            sorted by highest net profit percentage.
-        """
-        opportunities: List[tuple[ArbitrageOpportunity, ProfitabilityResult]] = []
-        exchanges = list(order_books.keys())
 
-        for i, buy_ex_name in enumerate(exchanges):
-            for sell_ex_name in exchanges[i + 1:]:
-                buy_book = order_books[buy_ex_name]
-                sell_book = order_books[sell_ex_name]
+def find_arbitrage_opportunities(
+    order_books: Dict[Tuple[str, str], object],
+    symbols: List[str],
+    exchanges: List[str],
+) -> List[ArbitrageOpportunity]:
+    """
+    Scans active order books to discover arbitrage spreads across specified exchanges.
+    """
+    opportunities: List[ArbitrageOpportunity] = []
 
-                # Compare Exchange A -> Exchange B and Exchange B -> Exchange A
-                for source_ex, target_ex, b_book, s_book in [
-                    (buy_ex_name, sell_ex_name, buy_book, sell_book),
-                    (sell_ex_name, buy_ex_name, sell_book, buy_book),
-                ]:
-                    if not b_book.asks or not s_book.bids:
-                        continue
+    for symbol in symbols:
+        for buy_ex in exchanges:
+            for sell_ex in exchanges:
+                if buy_ex == sell_ex:
+                    continue
 
-                    # Access the .price attribute directly on OrderBookLevel objects
-                    buy_price = b_book.asks[0].price
-                    sell_price = s_book.bids[0].price
+                buy_book = order_books.get((buy_ex, symbol))
+                sell_book = order_books.get((sell_ex, symbol))
 
-                    # Raw spread check before full depth computation
-                    if sell_price <= buy_price:
-                        continue
+                if not buy_book or not sell_book:
+                    continue
 
-                    # ... inside finder.py loop ...
-                    opportunity = ArbitrageOpportunity(
-                        symbol=b_book.symbol,
-                        buy_exchange=source_ex,
-                        sell_exchange=target_ex,
-                        buy_price=buy_price,
-                        sell_price=sell_price,
-                        detected_at=time.time(),
+                best_ask_raw = getattr(buy_book, "best_ask", None)
+                best_bid_raw = getattr(sell_book, "best_bid", None)
+
+                best_ask = _extract_price(best_ask_raw)
+                best_bid = _extract_price(best_bid_raw)
+
+                if best_ask is None or best_bid is None or best_ask <= 0:
+                    continue
+
+                gross_spread = best_bid - best_ask
+                gross_spread_pct = (gross_spread / best_ask) * 100.0
+                net_spread_pct = gross_spread_pct - TOTAL_TAKER_FEE_PERCENTAGE
+
+                is_profitable = net_spread_pct >= MIN_PROFIT_PERCENTAGE
+
+                opp = ArbitrageOpportunity(
+                    symbol=symbol,
+                    buy_exchange=buy_ex,
+                    sell_exchange=sell_ex,
+                    buy_price=best_ask,
+                    sell_price=best_bid,
+                    gross_spread=gross_spread,
+                    gross_spread_pct=gross_spread_pct,
+                    net_spread_pct=net_spread_pct,
+                    is_profitable=is_profitable,
+                )
+                opportunities.append(opp)
+
+                if is_profitable:
+                    logger.info(
+                        f"🔥 [PROFITABLE OPP!] {symbol} | Buy {buy_ex} @ ${best_ask:.4f} "
+                        f"-> Sell {sell_ex} @ ${best_bid:.4f} | Net Profit: {net_spread_pct:+.4f}%"
                     )
 
-                    try:
-                        result = self.calculator.calculate(
-                            opportunity=opportunity,
-                            buy_order_book=b_book,
-                            sell_order_book=s_book,
-                            quantity=trade_quantity,
-                        )
-
-                        if result.is_profitable:
-                            opportunities.append((opportunity, result))
-
-                    except Exception:
-                        continue
-
-        # Sort opportunities by highest net profit percentage descending
-        opportunities.sort(key=lambda item: item[1].net_profit_percentage, reverse=True)
-        return opportunities
+    return opportunities

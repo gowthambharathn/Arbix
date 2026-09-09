@@ -1,131 +1,114 @@
 """
-ArbiX Arbitrage Bot Main Entry Point
-
-Coordinates order book WebSocket streaming, scans for opportunities,
-evaluates profitability, and simulates paper trade executions.
+ArbiX Arbitrage Bot Main Runner
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
-from decimal import Decimal
+from typing import Dict, Tuple
 
-from arbitrage.calculator import ProfitabilityCalculator
-from arbitrage.finder import ArbitrageFinder
-from config.settings import settings
-from engine.paper_engine import PaperEngine
+# Ensure current project directory is in Python module search path
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+import config.settings as settings
+from arbitrage.finder import find_arbitrage_opportunities
 from market_data.streamer import MarketDataStreamer
 
-# Configure Logging
+# Setup clean logger formatting
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
+
 logger = logging.getLogger("ArbiX.Main")
 
+# Fallback attribute resolution for settings variables
+EXCHANGES = getattr(settings, "DEFAULT_EXCHANGES", getattr(settings, "EXCHANGES", ["binance", "kraken", "bybit"]))
+SYMBOLS = getattr(settings, "DEFAULT_SYMBOLS", getattr(settings, "TRADING_SYMBOLS", getattr(settings, "SYMBOLS", ["BTC/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"])))
+MIN_PROFIT_PERCENTAGE = getattr(settings, "MIN_PROFIT_PERCENTAGE", 0.20)
 
-async def run_arbitrage_loop(
-    streamer: MarketDataStreamer,
-    finder: ArbitrageFinder,
-    engine: PaperEngine,
-    interval_seconds: float = 0.5,
+
+def print_dashboard(
+    order_books: Dict[Tuple[str, str], object],
+    symbols: list[str],
+    exchanges: list[str],
+    opportunities: list,
 ) -> None:
-    """Periodically check active order books and execute profitable trades."""
-    logger.info("Starting arbitrage evaluation loop...")
-    heartbeat_counter = 0
+    """Print a clean live dashboard to the terminal."""
+    total_books = len(order_books)
+    max_possible = len(symbols) * len(exchanges)
 
-    try:
-        while True:
-            await asyncio.sleep(interval_seconds)
-            heartbeat_counter += 1
+    print("\n" + "=" * 70)
+    print(f" 🚀 ARBIX LIVE MONITORING | Active Streams: {total_books}/{max_possible}")
+    print("=" * 70)
+    print(f"{'SYMBOL':<10} | {'BUY AT':<8} | {'SELL AT':<8} | {'BEST SPREAD':<12} | {'NET PROFIT':<10}")
+    print("-" * 70)
 
-            active_books_count = len(streamer.order_books)
+    for symbol in symbols:
+        symbol_opps = [o for o in opportunities if o.symbol == symbol]
+        if not symbol_opps:
+            print(f"{symbol:<10} | {'N/A':<8} | {'N/A':<8} | {'Waiting data':<12} | {'N/A':<10}")
+            continue
 
-            # Log heartbeat every ~10 seconds (20 iterations at 0.5s)
-            if heartbeat_counter % 20 == 0:
-                cached_exchanges = list(streamer.order_books.keys())
-                logger.info(
-                    f"Heartbeat | Cached Order Books ({active_books_count}/{len(streamer.exchanges_instances)}): "
-                    f"{cached_exchanges}"
-                )
+        best_opp = max(symbol_opps, key=lambda x: x.gross_spread_pct)
+        status_flag = "🔥 YES" if getattr(best_opp, "is_profitable", False) else f"{best_opp.net_spread_pct:+.3f}%"
 
-            if active_books_count < 2:
-                continue
+        print(
+            f"{symbol:<10} | {best_opp.buy_exchange:<8} | {best_opp.sell_exchange:<8} | "
+            f"{best_opp.gross_spread_pct:+.3f}%       | {status_flag:<10}"
+        )
 
-            # Scan order books for profitable arbitrage opportunities
-            opportunities = finder.find_opportunities(
-                order_books=streamer.order_books,
-                trade_quantity=Decimal(str(settings.max_trade_amount)),
-            )
-
-            for opportunity, result in opportunities:
-                logger.info(
-                    f"Found Opportunity | Route: {opportunity.buy_exchange} -> {opportunity.sell_exchange} | "
-                    f"Gross Profit: ${result.gross_profit:.2f} | Net Profit: ${result.net_profit:.2f} "
-                    f"({result.net_profit_percentage:.2f}%)"
-                )
-
-                # Execute via paper engine
-                record = engine.execute_arbitrage(
-                    opportunity=opportunity,
-                    result=result,
-                )
-
-                if record:
-                    summary = engine.get_performance_summary()
-                    logger.info(
-                        f"Performance Summary | Executed Trades: {summary['total_trades']} | "
-                        f"Cumulative Profit: ${summary['total_net_profit']:.2f} | "
-                        f"Current USDT Balance: ${summary['usdt_balance']:.2f}"
-                    )
-
-    except asyncio.CancelledError:
-        logger.info("Arbitrage loop cancelled.")
+    print("=" * 70)
+    print(f"Target Profit Threshold: >={MIN_PROFIT_PERCENTAGE}% (Listening for opportunities...)\n")
 
 
 async def main() -> None:
-    """Main application lifecycle manager."""
-    exchanges = settings.exchanges
-    symbol = settings.symbol
+    logger.info(f"Initializing ArbiX Bot | Symbols: {SYMBOLS} | Exchanges: {EXCHANGES}")
 
-    logger.info(
-        f"Initializing ArbiX Bot | Symbol: {symbol} | Exchanges: {exchanges}"
-    )
+    streamer = MarketDataStreamer(exchanges=EXCHANGES, symbols=SYMBOLS)
 
-    calculator = ProfitabilityCalculator()
-    finder = ArbitrageFinder(calculator=calculator)
-    engine = PaperEngine()
+    tasks = []
+    for ex_name in EXCHANGES:
+        for symbol in SYMBOLS:
+            task = asyncio.create_task(
+                streamer.watch_exchange_symbol_order_book(ex_name, symbol)
+            )
+            tasks.append(task)
 
-    streamer = MarketDataStreamer(exchanges=exchanges, symbol=symbol)
-
-    # Launch streaming tasks per exchange
-    stream_tasks = [
-        asyncio.create_task(streamer.watch_exchange_order_book(ex_name))
-        for ex_name in streamer.exchanges_instances.keys()
-    ]
-
-    # Launch trade evaluation loop
-    eval_task = asyncio.create_task(
-        run_arbitrage_loop(streamer=streamer, finder=finder, engine=engine)
-    )
+    logger.info("Starting market streams and scanning loop...")
 
     try:
-        await asyncio.gather(*stream_tasks, eval_task)
-    except KeyboardInterrupt:
-        logger.info("Shutting down ArbiX engine...")
+        while True:
+            await asyncio.sleep(4)
+
+            opportunities = find_arbitrage_opportunities(
+                order_books=streamer.order_books,
+                symbols=SYMBOLS,
+                exchanges=EXCHANGES,
+            )
+
+            print_dashboard(
+                order_books=streamer.order_books,
+                symbols=SYMBOLS,
+                exchanges=EXCHANGES,
+                opportunities=opportunities,
+            )
+
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Stopping bot and closing exchange streams...")
     finally:
-        eval_task.cancel()
-        for task in stream_tasks:
+        for task in tasks:
             task.cancel()
         await streamer.close_all()
-        logger.info("Clean shutdown complete.")
+        logger.info("ArbiX Bot stopped cleanly.")
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    asyncio.run(main())
