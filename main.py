@@ -12,14 +12,19 @@ from typing import Dict, Tuple
 
 # Ensure current project directory is in Python module search path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-import config.settings as settings
+from config.settings import settings
 from arbitrage.finder import find_arbitrage_opportunities
 from market_data.streamer import MarketDataStreamer
 
-# Setup clean logger formatting
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -29,11 +34,19 @@ logging.basicConfig(
 
 logger = logging.getLogger("ArbiX.Main")
 
-# Fallback attribute resolution for settings variables
-EXCHANGES = getattr(settings, "DEFAULT_EXCHANGES", getattr(settings, "EXCHANGES", ["binance", "kraken", "bybit"]))
-SYMBOLS = getattr(settings, "DEFAULT_SYMBOLS", getattr(settings, "TRADING_SYMBOLS", getattr(settings, "SYMBOLS", ["BTC/USDT", "SOL/USDT", "DOGE/USDT", "PEPE/USDT"])))
-MIN_PROFIT_PERCENTAGE = getattr(settings, "MIN_PROFIT_PERCENTAGE", 0.20)
 
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+SYMBOLS = settings.symbols
+EXCHANGES = settings.exchanges
+MIN_PROFIT_PERCENTAGE = settings.min_profit_percentage
+
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
 
 def print_dashboard(
     order_books: Dict[Tuple[str, str], object],
@@ -41,48 +54,105 @@ def print_dashboard(
     exchanges: list[str],
     opportunities: list,
 ) -> None:
-    """Print a clean live dashboard to the terminal."""
+    """Print the current arbitrage monitoring dashboard."""
+
     total_books = len(order_books)
     max_possible = len(symbols) * len(exchanges)
 
     print("\n" + "=" * 70)
-    print(f" 🚀 ARBIX LIVE MONITORING | Active Streams: {total_books}/{max_possible}")
+    print(
+        f" ARBIX LIVE MONITORING | "
+        f"Active Streams: {total_books}/{max_possible}"
+    )
     print("=" * 70)
-    print(f"{'SYMBOL':<10} | {'BUY AT':<8} | {'SELL AT':<8} | {'BEST SPREAD':<12} | {'NET PROFIT':<10}")
+
+    print(
+        f"{'SYMBOL':<10} | "
+        f"{'BUY AT':<8} | "
+        f"{'SELL AT':<8} | "
+        f"{'BEST SPREAD':<12} | "
+        f"{'NET PROFIT':<10}"
+    )
+
     print("-" * 70)
 
     for symbol in symbols:
-        symbol_opps = [o for o in opportunities if o.symbol == symbol]
-        if not symbol_opps:
-            print(f"{symbol:<10} | {'N/A':<8} | {'N/A':<8} | {'Waiting data':<12} | {'N/A':<10}")
+        symbol_opportunities = [
+            opportunity
+            for opportunity in opportunities
+            if opportunity.symbol == symbol
+        ]
+
+        if not symbol_opportunities:
+            print(
+                f"{symbol:<10} | "
+                f"{'N/A':<8} | "
+                f"{'N/A':<8} | "
+                f"{'Waiting data':<12} | "
+                f"{'N/A':<10}"
+            )
             continue
 
-        best_opp = max(symbol_opps, key=lambda x: x.gross_spread_pct)
-        status_flag = "🔥 YES" if getattr(best_opp, "is_profitable", False) else f"{best_opp.net_spread_pct:+.3f}%"
+        best_opportunity = max(
+            symbol_opportunities,
+            key=lambda opportunity: opportunity.gross_spread_pct,
+        )
+
+        if getattr(best_opportunity, "is_profitable", False):
+            status = "YES"
+        else:
+            status = f"{best_opportunity.net_spread_pct:+.3f}%"
 
         print(
-            f"{symbol:<10} | {best_opp.buy_exchange:<8} | {best_opp.sell_exchange:<8} | "
-            f"{best_opp.gross_spread_pct:+.3f}%       | {status_flag:<10}"
+            f"{symbol:<10} | "
+            f"{best_opportunity.buy_exchange:<8} | "
+            f"{best_opportunity.sell_exchange:<8} | "
+            f"{best_opportunity.gross_spread_pct:+.3f}%       | "
+            f"{status:<10}"
         )
 
     print("=" * 70)
-    print(f"Target Profit Threshold: >={MIN_PROFIT_PERCENTAGE}% (Listening for opportunities...)\n")
 
+    print(
+        f"Target Profit Threshold: "
+        f">={MIN_PROFIT_PERCENTAGE}% "
+        f"(Listening for opportunities...)\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 async def main() -> None:
-    logger.info(f"Initializing ArbiX Bot | Symbols: {SYMBOLS} | Exchanges: {EXCHANGES}")
+    """Initialize ArbiX and start market monitoring."""
 
-    streamer = MarketDataStreamer(exchanges=EXCHANGES, symbols=SYMBOLS)
+    logger.info(
+        "Initializing ArbiX Bot | "
+        f"Symbols: {SYMBOLS} | "
+        f"Exchanges: {EXCHANGES}"
+    )
 
-    tasks = []
-    for ex_name in EXCHANGES:
+    streamer = MarketDataStreamer(
+        exchanges=EXCHANGES,
+        symbols=SYMBOLS,
+    )
+
+    tasks: list[asyncio.Task] = []
+
+    for exchange in EXCHANGES:
         for symbol in SYMBOLS:
             task = asyncio.create_task(
-                streamer.watch_exchange_symbol_order_book(ex_name, symbol)
+                streamer.watch_exchange_symbol_order_book(
+                    exchange,
+                    symbol,
+                )
             )
             tasks.append(task)
 
-    logger.info("Starting market streams and scanning loop...")
+    logger.info(
+        "Starting market streams and arbitrage scanning loop..."
+    )
 
     try:
         while True:
@@ -102,11 +172,16 @@ async def main() -> None:
             )
 
     except (KeyboardInterrupt, asyncio.CancelledError):
-        logger.info("Stopping bot and closing exchange streams...")
+        logger.info(
+            "Stopping bot and closing exchange streams..."
+        )
+
     finally:
         for task in tasks:
             task.cancel()
+
         await streamer.close_all()
+
         logger.info("ArbiX Bot stopped cleanly.")
 
 
