@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import List
+from typing import Dict, List
 
 from dotenv import load_dotenv
 
@@ -36,12 +36,17 @@ class Settings:
     min_profit_percentage: float
     max_trade_amount: float
     paper_balance_usdt: float
-    taker_fee: float
+
+    exchange_taker_fees: Dict[str, float]
 
     @property
     def symbol(self) -> str:
         """Return the first configured symbol for backward compatibility."""
         return self.symbols[0] if self.symbols else "BTC/USDT"
+
+    def get_taker_fee(self, exchange: str) -> float:
+        """Return the configured taker fee for an exchange."""
+        return self.exchange_taker_fees.get(exchange.lower(), 0.001)
 
 
 def _get_symbols() -> List[str]:
@@ -77,6 +82,18 @@ def _get_exchanges() -> List[str]:
 def load_settings() -> Settings:
     """Load application settings from environment variables."""
 
+    exchange_taker_fees = {
+        "binance": float(
+            os.getenv("BINANCE_TAKER_FEE", "0.001")
+        ),
+        "bybit": float(
+            os.getenv("BYBIT_TAKER_FEE", "0.001")
+        ),
+        "okx": float(
+            os.getenv("OKX_TAKER_FEE", "0.001")
+        ),
+    }
+
     return Settings(
         symbols=_get_symbols(),
         exchanges=_get_exchanges(),
@@ -92,9 +109,7 @@ def load_settings() -> Settings:
         paper_balance_usdt=float(
             os.getenv("PAPER_BALANCE_USDT", "1000.0")
         ),
-        taker_fee=float(
-            os.getenv("TAKER_FEE", "0.001")
-        ),
+        exchange_taker_fees=exchange_taker_fees,
     )
 
 

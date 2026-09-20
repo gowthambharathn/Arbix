@@ -1,21 +1,36 @@
 """
 ArbiX Arbitrage Finder
 
-Evaluates real-time order books across exchanges to find gross and net spread opportunities.
+Evaluates real-time order books across exchanges to find
+arbitrage opportunities using order-book depth, trading fees,
+executable trade prices, order-book freshness, and liquidity.
 """
 
 from __future__ import annotations
 
 import logging
+import time
+from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
-import config.settings as settings
+import config.settings as settings_module
+
 
 logger = logging.getLogger("ArbiX.Finder")
 
-# Resolve parameters safely from settings
-MIN_PROFIT_PERCENTAGE = getattr(settings, "MIN_PROFIT_PERCENTAGE", getattr(settings, "MIN_PROFIT_THRESHOLD", 0.20))
-TOTAL_TAKER_FEE_PERCENTAGE = getattr(settings, "TOTAL_TAKER_FEE_PERCENTAGE", getattr(settings, "TOTAL_FEE_PERCENTAGE", 0.20))
+settings = settings_module.settings
+
+MIN_PROFIT_PERCENTAGE = Decimal(
+    str(settings.min_profit_percentage)
+)
+
+TRADE_AMOUNT = Decimal(
+    str(settings.max_trade_amount)
+)
+
+MAX_ORDER_BOOK_AGE_SECONDS = 5.0
+
+MIN_LIQUIDITY_MULTIPLIER = Decimal("1.0")
 
 
 class ArbitrageOpportunity:
@@ -30,33 +45,130 @@ class ArbitrageOpportunity:
         sell_price: float,
         gross_spread: float,
         gross_spread_pct: float,
+        buy_fee: float,
+        sell_fee: float,
+        total_fee_pct: float,
+        net_profit: float,
         net_spread_pct: float,
+        trade_quantity: float,
+        trade_amount: float,
         is_profitable: bool,
     ) -> None:
         self.symbol = symbol
         self.buy_exchange = buy_exchange
         self.sell_exchange = sell_exchange
+
         self.buy_price = buy_price
         self.sell_price = sell_price
+
         self.gross_spread = gross_spread
         self.gross_spread_pct = gross_spread_pct
+
+        self.buy_fee = buy_fee
+        self.sell_fee = sell_fee
+        self.total_fee_pct = total_fee_pct
+
+        self.net_profit = net_profit
         self.net_spread_pct = net_spread_pct
+
+        self.trade_quantity = trade_quantity
+        self.trade_amount = trade_amount
+
         self.is_profitable = is_profitable
 
 
-def _extract_price(level: object) -> Optional[float]:
-    """Extracts numeric price from an OrderBookLevel object, tuple, dict, or float."""
-    if level is None:
+def _calculate_execution(
+    buy_book: object,
+    sell_book: object,
+    trade_amount: Decimal,
+) -> Optional[
+    Tuple[
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+        Decimal,
+    ]
+]:
+    """
+    Calculate executable prices using order-book depth.
+
+    Returns:
+
+        average_buy_price
+        average_sell_price
+        trade_quantity
+        total_buy_cost
+        total_sell_value
+
+    Returns None when there is insufficient liquidity.
+    """
+
+    best_ask = getattr(buy_book, "best_ask", None)
+    best_bid = getattr(sell_book, "best_bid", None)
+
+    if best_ask is None or best_bid is None:
         return None
-    if isinstance(level, (int, float)):
-        return float(level)
-    if hasattr(level, "price"):
-        return float(level.price)
-    if isinstance(level, (list, tuple)) and len(level) > 0:
-        return float(level[0])
-    if isinstance(level, dict) and "price" in level:
-        return float(level["price"])
-    return None
+
+    best_ask_price = Decimal(str(best_ask.price))
+    best_bid_price = Decimal(str(best_bid.price))
+
+    if best_ask_price <= 0 or best_bid_price <= 0:
+        return None
+
+    # Determine how much base asset we want to buy.
+    trade_quantity = trade_amount / best_ask_price
+
+    if trade_quantity <= 0:
+        return None
+
+    # -------------------------------------------------
+    # Minimum liquidity requirement
+    # -------------------------------------------------
+
+    required_trade_amount = (
+        trade_amount * MIN_LIQUIDITY_MULTIPLIER
+    )
+
+    if required_trade_amount <= 0:
+        return None
+
+    try:
+        total_buy_cost = buy_book.ask_cost(
+            trade_quantity
+        )
+
+        total_sell_value = sell_book.bid_value(
+            trade_quantity
+        )
+
+    except ValueError:
+        # Not enough order-book liquidity.
+        return None
+
+    # Make sure both sides can support the required
+    # trade value.
+    if total_buy_cost < required_trade_amount:
+        return None
+
+    if total_sell_value < required_trade_amount:
+        return None
+
+    average_buy_price = (
+        total_buy_cost / trade_quantity
+    )
+
+    average_sell_price = (
+        total_sell_value / trade_quantity
+    )
+
+    return (
+        average_buy_price,
+        average_sell_price,
+        trade_quantity,
+        total_buy_cost,
+        total_sell_value,
+    )
 
 
 def find_arbitrage_opportunities(
@@ -65,54 +177,262 @@ def find_arbitrage_opportunities(
     exchanges: List[str],
 ) -> List[ArbitrageOpportunity]:
     """
-    Scans active order books to discover arbitrage spreads across specified exchanges.
+    Scan active order books and find executable arbitrage opportunities.
+
+    The calculation uses:
+
+        Order-book depth
+        +
+        Actual execution value
+        +
+        Buy fee
+        +
+        Sell fee
+        +
+        Order-book freshness
+        +
+        Minimum liquidity
+        =
+        Net profit
     """
+
     opportunities: List[ArbitrageOpportunity] = []
 
     for symbol in symbols:
-        for buy_ex in exchanges:
-            for sell_ex in exchanges:
-                if buy_ex == sell_ex:
+
+        for buy_exchange in exchanges:
+
+            for sell_exchange in exchanges:
+
+                if buy_exchange == sell_exchange:
                     continue
 
-                buy_book = order_books.get((buy_ex, symbol))
-                sell_book = order_books.get((sell_ex, symbol))
+                buy_book = order_books.get(
+                    (buy_exchange, symbol)
+                )
 
-                if not buy_book or not sell_book:
+                sell_book = order_books.get(
+                    (sell_exchange, symbol)
+                )
+
+                if buy_book is None or sell_book is None:
                     continue
 
-                best_ask_raw = getattr(buy_book, "best_ask", None)
-                best_bid_raw = getattr(sell_book, "best_bid", None)
+                # -------------------------------------------------
+                # Order-book freshness
+                # -------------------------------------------------
 
-                best_ask = _extract_price(best_ask_raw)
-                best_bid = _extract_price(best_bid_raw)
+                current_time = time.time()
 
-                if best_ask is None or best_bid is None or best_ask <= 0:
+                buy_age = (
+                    current_time
+                    - buy_book.timestamp
+                )
+
+                sell_age = (
+                    current_time
+                    - sell_book.timestamp
+                )
+
+                if (
+                    buy_age > MAX_ORDER_BOOK_AGE_SECONDS
+                    or sell_age > MAX_ORDER_BOOK_AGE_SECONDS
+                ):
                     continue
 
-                gross_spread = best_bid - best_ask
-                gross_spread_pct = (gross_spread / best_ask) * 100.0
-                net_spread_pct = gross_spread_pct - TOTAL_TAKER_FEE_PERCENTAGE
+                # -------------------------------------------------
+                # Calculate executable trade
+                # -------------------------------------------------
 
-                is_profitable = net_spread_pct >= MIN_PROFIT_PERCENTAGE
+                execution = _calculate_execution(
+                    buy_book=buy_book,
+                    sell_book=sell_book,
+                    trade_amount=TRADE_AMOUNT,
+                )
 
-                opp = ArbitrageOpportunity(
+                if execution is None:
+                    continue
+
+                (
+                    average_buy_price,
+                    average_sell_price,
+                    trade_quantity,
+                    total_buy_cost,
+                    total_sell_value,
+                ) = execution
+
+                if average_sell_price <= average_buy_price:
+                    continue
+
+                # -------------------------------------------------
+                # Fees
+                # -------------------------------------------------
+
+                buy_fee_rate = Decimal(
+                    str(
+                        settings.get_taker_fee(
+                            buy_exchange
+                        )
+                    )
+                )
+
+                sell_fee_rate = Decimal(
+                    str(
+                        settings.get_taker_fee(
+                            sell_exchange
+                        )
+                    )
+                )
+
+                # -------------------------------------------------
+                # Actual fee calculation
+                # -------------------------------------------------
+
+                buy_fee = (
+                    total_buy_cost
+                    * buy_fee_rate
+                )
+
+                sell_fee = (
+                    total_sell_value
+                    * sell_fee_rate
+                )
+
+                # -------------------------------------------------
+                # Actual money flow
+                # -------------------------------------------------
+
+                total_cost_with_fee = (
+                    total_buy_cost
+                    + buy_fee
+                )
+
+                total_revenue_after_fee = (
+                    total_sell_value
+                    - sell_fee
+                )
+
+                net_profit = (
+                    total_revenue_after_fee
+                    - total_cost_with_fee
+                )
+
+                # -------------------------------------------------
+                # Gross spread
+                # -------------------------------------------------
+
+                gross_spread = (
+                    average_sell_price
+                    - average_buy_price
+                )
+
+                gross_spread_pct = (
+                    gross_spread
+                    / average_buy_price
+                ) * Decimal("100")
+
+                # -------------------------------------------------
+                # Actual net ROI
+                # -------------------------------------------------
+
+                if total_cost_with_fee <= 0:
+                    continue
+
+                net_spread_pct = (
+                    net_profit
+                    / total_cost_with_fee
+                ) * Decimal("100")
+
+                # -------------------------------------------------
+                # Combined fee percentage
+                # -------------------------------------------------
+
+                total_fee_pct = (
+                    buy_fee_rate
+                    + sell_fee_rate
+                ) * Decimal("100")
+
+                # -------------------------------------------------
+                # Profitability
+                # -------------------------------------------------
+
+                is_profitable = (
+                    net_spread_pct
+                    >= MIN_PROFIT_PERCENTAGE
+                )
+
+                # -------------------------------------------------
+                # Create opportunity
+                # -------------------------------------------------
+
+                opportunity = ArbitrageOpportunity(
                     symbol=symbol,
-                    buy_exchange=buy_ex,
-                    sell_exchange=sell_ex,
-                    buy_price=best_ask,
-                    sell_price=best_bid,
-                    gross_spread=gross_spread,
-                    gross_spread_pct=gross_spread_pct,
-                    net_spread_pct=net_spread_pct,
+                    buy_exchange=buy_exchange,
+                    sell_exchange=sell_exchange,
+                    buy_price=float(
+                        average_buy_price
+                    ),
+                    sell_price=float(
+                        average_sell_price
+                    ),
+                    gross_spread=float(
+                        gross_spread
+                    ),
+                    gross_spread_pct=float(
+                        gross_spread_pct
+                    ),
+                    buy_fee=float(
+                        buy_fee
+                    ),
+                    sell_fee=float(
+                        sell_fee
+                    ),
+                    total_fee_pct=float(
+                        total_fee_pct
+                    ),
+                    net_profit=float(
+                        net_profit
+                    ),
+                    net_spread_pct=float(
+                        net_spread_pct
+                    ),
+                    trade_quantity=float(
+                        trade_quantity
+                    ),
+                    trade_amount=float(
+                        TRADE_AMOUNT
+                    ),
                     is_profitable=is_profitable,
                 )
-                opportunities.append(opp)
+
+                opportunities.append(
+                    opportunity
+                )
+
+                # -------------------------------------------------
+                # Log profitable opportunities
+                # -------------------------------------------------
 
                 if is_profitable:
                     logger.info(
-                        f"🔥 [PROFITABLE OPP!] {symbol} | Buy {buy_ex} @ ${best_ask:.4f} "
-                        f"-> Sell {sell_ex} @ ${best_bid:.4f} | Net Profit: {net_spread_pct:+.4f}%"
+                        "[PROFITABLE OPP] %s | "
+                        "Buy %s @ %.8f -> "
+                        "Sell %s @ %.8f | "
+                        "Amount: $%.2f | "
+                        "Gross: %+0.4f%% | "
+                        "Fees: -%.4f%% | "
+                        "Profit: $%+.4f | "
+                        "Net: %+0.4f%%",
+                        symbol,
+                        buy_exchange,
+                        average_buy_price,
+                        sell_exchange,
+                        average_sell_price,
+                        TRADE_AMOUNT,
+                        gross_spread_pct,
+                        total_fee_pct,
+                        net_profit,
+                        net_spread_pct,
                     )
 
     return opportunities
